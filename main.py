@@ -7,6 +7,10 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QTimer, Qt
+from deepface import DeepFace
+import numpy as np
+import time
+import threading
 
 REFERENCE_DIR = "reference"
 
@@ -48,7 +52,7 @@ class RegisterPage(QWidget):
         # Pose Label and Image Label
         self.pose_label = QLabel("Pose: Not Started", alignment=Qt.AlignCenter)
         self.image_label = QLabel()
-        self.image_label.setFixedSize(640, 480)  # Increased resolution for better clarity
+        self.image_label.setFixedSize(1280, 720)  # Increased resolution for better clarity
         self.image_label.setAlignment(Qt.AlignCenter)
 
         # Capture Button (Initially Disabled)
@@ -72,8 +76,8 @@ class RegisterPage(QWidget):
 
     def save_name(self):
         """Save user name and create a folder based on last name."""
-        first_name = self.first_name_input.text().strip()
-        last_name = self.last_name_input.text().strip()
+        first_name = self.first_name_input.text().strip().upper()
+        last_name = self.last_name_input.text().strip().upper()
 
         if not first_name or not last_name:
             QMessageBox.warning(self, "Input Error", "Please enter both First Name and Last Name.")
@@ -92,8 +96,8 @@ class RegisterPage(QWidget):
     def start_camera(self):
         if self.camera is None:
             self.camera = cv2.VideoCapture(0)  # Initialize the camera
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)  # Set max width
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)  # Set max height
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)  # Set max width
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)  # Set max height
             self.timer.start(30)  # Refresh every 30ms
 
     def stop_camera(self):
@@ -121,7 +125,8 @@ class RegisterPage(QWidget):
         ret, frame = self.camera.read()
         if ret:
             user_dir = os.path.join(REFERENCE_DIR, self.user_last_name)
-            filename = os.path.join(user_dir, f"pose_{self.pose_index}.jpg")
+            pose_name = self.poses[self.pose_index]  # Get the current pose name
+            filename = os.path.join(user_dir, f"{self.user_last_name}_{pose_name}_Face.png")  # Save as .png
             cv2.imwrite(filename, frame)
 
             self.pose_index += 1
@@ -143,11 +148,102 @@ class LoginPage(QWidget):
     def __init__(self, stacked_widget):
         super().__init__()
         self.stacked_widget = stacked_widget
+        self.face_match = False
+        self.camera = None
+
         layout = QVBoxLayout()
-        self.label = QLabel("Login Page", alignment=Qt.AlignCenter)
+
+        self.label = QLabel("Face Login")
+        self.label.setAlignment(Qt.AlignCenter)
+
+        self.image_label = QLabel()
+        self.image_label.setFixedSize(640, 480)  # Webcam feed size
+        self.image_label.setAlignment(Qt.AlignCenter)
+
         layout.addWidget(self.label)
-        layout.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.image_label)
+
         self.setLayout(layout)
+
+        # Initialize webcam and processing thread
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_frame)
+
+        self.lock = threading.Lock()
+        self.running = True
+        self.start_camera()
+
+        # Start face recognition in a separate thread
+        threading.Thread(target=self.face_processing, daemon=True).start()
+
+    def start_camera(self):
+        """Start the webcam."""
+        if self.camera is None:
+            self.camera = cv2.VideoCapture(0)
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.timer.start(30)  # Refresh every 30ms
+
+    def stop_camera(self):
+        """Stop the webcam."""
+        if self.camera is not None:
+            self.timer.stop()
+            self.camera.release()
+            self.camera = None
+
+    def update_frame(self):
+        """Update the webcam frame in QLabel."""
+        if self.camera is not None:
+            ret, frame = self.camera.read()
+            if ret:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                height, width, channel = frame.shape
+                bytes_per_line = 3 * width
+                q_img = QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                self.image_label.setPixmap(QPixmap.fromImage(q_img))
+
+    def face_processing(self):
+        """Continuously check for face recognition in the background."""
+        while self.running:
+            if self.camera is None:
+                continue
+
+            ret, frame = self.camera.read()
+            if not ret:
+                continue
+
+            recognized_name = self.check_face(frame)
+            if recognized_name:
+                self.label.setText(f"Match: {recognized_name}")
+                QMessageBox.information(self, "Login Successful", f"Welcome, {recognized_name}!")
+                self.running = False
+                self.stop_camera()
+                self.stacked_widget.setCurrentIndex(2)  # Switch to another page after login
+            else:
+                self.label.setText("No Match")
+
+    def check_face(self, img):
+        """Compare the detected face with stored reference images."""
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img_resized = cv2.resize(img_rgb, (160, 160))
+
+        for user_folder in os.listdir(REFERENCE_DIR):
+            user_dir = os.path.join(REFERENCE_DIR, user_folder)
+
+            for file in os.listdir(user_dir):
+                if file.endswith(".jpg"):
+                    ref_img = cv2.imread(os.path.join(user_dir, file))
+                    ref_img_rgb = cv2.cvtColor(ref_img, cv2.COLOR_BGR2RGB)
+                    ref_img_resized = cv2.resize(ref_img_rgb, (160, 160))
+
+                    try:
+                        result = DeepFace.verify(img_resized, ref_img_resized, detector_backend="opencv")["verified"]
+                        if result:
+                            return user_folder  # Return last name as a match
+                    except ValueError:
+                        continue
+
+        return None
 
 def main():
     app = QApplication(sys.argv)
