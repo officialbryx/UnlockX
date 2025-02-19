@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import (
     QApplication, QStackedWidget, QWidget, QVBoxLayout, 
     QPushButton, QLabel, QLineEdit, QMessageBox, QHBoxLayout
 )
-from PyQt5.QtGui import QImage, QPixmap, QFont
+from PyQt5.QtGui import QImage, QPixmap, QFont, QIcon
 from PyQt5.QtCore import QTimer, Qt, QSize
 from deepface import DeepFace
 import numpy as np
@@ -17,6 +17,7 @@ REFERENCE_DIR = "reference"
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
+        self.setWindowTitle("UnlockX")  # Set window title
         self.setStyleSheet("""
             QWidget {
                 background-color: #f0f0f0;
@@ -44,16 +45,19 @@ class MainWindow(QWidget):
         
         # Logo container
         logo_container = QVBoxLayout()
+        logo_container.setAlignment(Qt.AlignCenter)  # Center the container
         self.logo_label = QLabel()
         # Replace 'logo.png' with your actual logo file
-        logo_pixmap = QPixmap("logo.png")
+        logo_pixmap = QPixmap(r'logo\unlockx.png')
         if not logo_pixmap.isNull():
-            scaled_logo = logo_pixmap.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled_logo = logo_pixmap.scaled(100, 100, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.logo_label.setPixmap(scaled_logo)
+            self.logo_label.setFixedSize(100, 100)  # Set fixed size for the label
         else:
             # Fallback if no logo is found
             self.logo_label.setText("👤")
             self.logo_label.setStyleSheet("QLabel { font-size: 100px; }")
+            self.logo_label.setFixedSize(250, 250)  # Set fixed size even for fallback
         self.logo_label.setAlignment(Qt.AlignCenter)
         
         # Title
@@ -63,13 +67,13 @@ class MainWindow(QWidget):
             QLabel {
                 font-size: 36px;
                 font-weight: bold;
-                color: #1976D2;
+                color: #4CAF50;
                 margin: 20px;
             }
         """)
         
         # Subtitle
-        self.subtitle_label = QLabel("Secure Face Recognition System")
+        self.subtitle_label = QLabel("Lightweight & Secure Face Recognition System")
         self.subtitle_label.setAlignment(Qt.AlignCenter)
         self.subtitle_label.setStyleSheet("""
             QLabel {
@@ -84,9 +88,9 @@ class MainWindow(QWidget):
         self.register_button = QPushButton("Register New User")
         self.login_button = QPushButton("Login with Face ID")
         
-        # Add widgets to layout
+        # Add widgets to layout with center alignment
         logo_container.addStretch()
-        logo_container.addWidget(self.logo_label)
+        logo_container.addWidget(self.logo_label, alignment=Qt.AlignCenter)  # Add explicit alignment
         logo_container.addWidget(self.title_label)
         logo_container.addWidget(self.subtitle_label)
         logo_container.addStretch()
@@ -103,6 +107,7 @@ class MainWindow(QWidget):
 class RegisterPage(QWidget):
     def __init__(self, stacked_widget):
         super().__init__()
+        self.setWindowTitle("Register | UnlockX")  # Set window title
         self.setStyleSheet("""
             QWidget {
                 background-color: #f0f0f0;
@@ -140,19 +145,52 @@ class RegisterPage(QWidget):
         self.user_last_name = ""
 
         layout = QVBoxLayout()
+        layout.setSpacing(10)  # Set consistent spacing between widgets
+        layout.setContentsMargins(20, 20, 20, 20)  # Set smaller margins
 
         # Name Input Fields
         self.first_name_input = QLineEdit()
         self.first_name_input.setPlaceholderText("Enter First Name")
         self.last_name_input = QLineEdit()
         self.last_name_input.setPlaceholderText("Enter Last Name")
+        
+        # Create button container for name buttons
+        name_buttons_container = QHBoxLayout()
         self.save_name_button = QPushButton("Save Name")
         self.save_name_button.clicked.connect(self.save_name)
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_registration)
+        self.cancel_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                border: none;
+                border-radius: 20px;
+                padding: 15px 32px;
+                font-size: 16px;
+                min-width: 200px;
+                margin: 10px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+        """)
+        
+        name_buttons_container.addWidget(self.save_name_button)
+        name_buttons_container.addWidget(self.cancel_button)
+        name_buttons_container.setAlignment(Qt.AlignCenter)
+
+        # Update layout
+        layout.addWidget(QLabel("User Registration", alignment=Qt.AlignCenter))
+        layout.addWidget(self.first_name_input)
+        layout.addWidget(self.last_name_input)
+        layout.addLayout(name_buttons_container)
 
         # Pose Label and Image Label
         self.pose_label = QLabel("Pose: Not Started", alignment=Qt.AlignCenter)
+        self.pose_label.setContentsMargins(0, 5, 0, 5)  # Reduce vertical margins
         self.image_label = QLabel()
-        self.image_label.setFixedSize(1280, 720)  # Increased resolution for better clarity
+        self.image_label.setFixedSize(500, 350)  # More reasonable size
         self.image_label.setAlignment(Qt.AlignCenter)
 
         # Capture Button (Initially Disabled)
@@ -160,10 +198,6 @@ class RegisterPage(QWidget):
         self.capture_button.setEnabled(False)
         self.capture_button.clicked.connect(self.capture_image)
 
-        layout.addWidget(QLabel("User Registration", alignment=Qt.AlignCenter))
-        layout.addWidget(self.first_name_input)
-        layout.addWidget(self.last_name_input)
-        layout.addWidget(self.save_name_button)
         layout.addWidget(self.pose_label)
         layout.addWidget(self.image_label, alignment=Qt.AlignCenter)
         layout.addWidget(self.capture_button, alignment=Qt.AlignCenter)
@@ -192,6 +226,13 @@ class RegisterPage(QWidget):
         self.pose_label.setText(f"Pose: {self.poses[self.pose_index]}")
         self.capture_button.setEnabled(True)
         self.start_camera()
+
+    def cancel_registration(self):
+        """Cancel registration and return to main page"""
+        self.stop_camera()
+        self.first_name_input.clear()
+        self.last_name_input.clear()
+        self.stacked_widget.setCurrentIndex(0)  # Return to main page
 
     def start_camera(self):
         if self.camera is None:
@@ -247,6 +288,7 @@ class RegisterPage(QWidget):
 class LoginPage(QWidget):
     def __init__(self, stacked_widget):
         super().__init__()
+        self.setWindowTitle("Login | UnlockX")  # Set window title
         self.setStyleSheet("""
             QWidget {
                 background-color: #f0f0f0;
@@ -294,10 +336,34 @@ class LoginPage(QWidget):
         self.matched_user = None
 
         layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignCenter)  # Center all content vertically
+
+        # Create a container widget for the camera feed
+        camera_container = QWidget()
+        camera_layout = QVBoxLayout(camera_container)
+        camera_layout.setAlignment(Qt.AlignCenter)
+
+        self.label = QLabel("Face Login")
+        self.label.setAlignment(Qt.AlignCenter)
+
+        self.status_label = QLabel("Looking for face...")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setObjectName("status_label")
+
+        self.image_label = QLabel()
+        self.image_label.setFixedSize(640, 480)  # Standard 4:3 aspect ratio
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.setStyleSheet("""
+            QLabel {
+                border: 2px solid #cccccc;
+                border-radius: 10px;
+                background-color: #ffffff;
+            }
+        """)
 
         # Create button container for the bottom
         button_container = QHBoxLayout()
-        button_container.addStretch()  # Push buttons to the right
+        button_container.setAlignment(Qt.AlignCenter)  # Center the buttons
 
         self.continue_button = QPushButton("Continue")
         self.continue_button.setObjectName("continue_button")
@@ -310,21 +376,12 @@ class LoginPage(QWidget):
         button_container.addWidget(self.continue_button)
         button_container.addWidget(self.back_button)
 
-        self.label = QLabel("Face Login")
-        self.label.setAlignment(Qt.AlignCenter)
-
-        self.status_label = QLabel("Looking for face...")
-        self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setObjectName("status_label")
-
-        self.image_label = QLabel()
-        self.image_label.setFixedSize(800, 600)
-        self.image_label.setAlignment(Qt.AlignCenter)
-
+        # Add widgets to the layout
         layout.addWidget(self.label)
         layout.addWidget(self.status_label)
-        layout.addWidget(self.image_label)
-        layout.addLayout(button_container)  # Add button container at the bottom
+        camera_layout.addWidget(self.image_label)
+        layout.addWidget(camera_container)
+        layout.addLayout(button_container)
 
         self.setLayout(layout)
 
@@ -391,8 +448,8 @@ class LoginPage(QWidget):
     def start_login_camera(self):
         if self.camera is None:
             self.camera = cv2.VideoCapture(0)
-            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 800)
-            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             self.timer.start(30)
             self.status_label.setText("Looking for face...")
             self.matched_user = None
@@ -415,6 +472,8 @@ class LoginPage(QWidget):
         if self.camera is not None:
             ret, frame = self.camera.read()
             if ret:
+                # Resize frame to match the image_label size
+                frame = cv2.resize(frame, (640, 480))
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 height, width, channel = frame.shape
                 bytes_per_line = 3 * width
@@ -442,8 +501,18 @@ class LoginPage(QWidget):
 
 def main():
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(r'logo\unlockx.png')) # Set application icon
     stacked_widget = QStackedWidget()
     stacked_widget.setFixedSize(1366, 768)  # Set the constant window size
+
+    # Add title change handlers
+    def update_title(widget):
+        if isinstance(widget, MainWindow):
+            stacked_widget.setWindowTitle("UnlockX")
+        elif isinstance(widget, RegisterPage):
+            stacked_widget.setWindowTitle("Register | UnlockX")
+        elif isinstance(widget, LoginPage):
+            stacked_widget.setWindowTitle("Login | UnlockX")
 
     main_window = MainWindow()
     register_page = RegisterPage(stacked_widget)
@@ -452,6 +521,9 @@ def main():
     stacked_widget.addWidget(main_window)
     stacked_widget.addWidget(register_page)
     stacked_widget.addWidget(login_page)
+
+    # Connect title update handlers
+    stacked_widget.currentChanged.connect(lambda: update_title(stacked_widget.currentWidget()))
 
     main_window.register_button.clicked.connect(lambda: stacked_widget.setCurrentWidget(register_page))
     main_window.login_button.clicked.connect(lambda: stacked_widget.setCurrentWidget(login_page))
