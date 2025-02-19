@@ -1,5 +1,6 @@
 import threading
 import cv2
+import os
 from deepface import DeepFace
 
 # Initialize webcam
@@ -9,17 +10,25 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 counter = 0
 face_match = False
-lock = threading.Lock()  # To prevent race conditions
+lock = threading.Lock()  # Prevents race conditions
 
-# Load reference image
-reference_img = cv2.imread("reference.jpg")
+# Load all reference images from the directory
+reference_dir = "reference/TIAMZON"
+reference_images = [cv2.imread(os.path.join(reference_dir, file)) 
+                    for file in os.listdir(reference_dir) if file.endswith(".jpg")]
 
 def check_face(img):
     global face_match
     try:
-        result = DeepFace.verify(img, reference_img.copy())['verified']
+        for ref_img in reference_images:
+            result = DeepFace.verify(img, ref_img.copy())['verified']
+            if result:  # If any match is found, set face_match = True
+                with lock:
+                    face_match = True
+                return  
+        # If no match is found, set face_match = False
         with lock:
-            face_match = result
+            face_match = False
     except ValueError:
         with lock:
             face_match = False
