@@ -5,12 +5,16 @@ import shutil
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import QImage, QPixmap, QFont, QIcon
 from PyQt5.QtCore import QTimer, Qt, QSize
-from deepface import DeepFace
 import numpy as np
+import warnings
 import time
 import threading
 from datetime import datetime
-from retinaface import RetinaFace
+from insightface.app import FaceAnalysis
+from insightface.utils import face_align
+
+# Filter numpy warnings about rcond parameter
+warnings.filterwarnings('ignore', category=FutureWarning)
 
 FAMILY_DIR = "family_photos"
 SAFE_LOG_FILE = "safe_members.txt"
@@ -81,7 +85,7 @@ class MainWindow(QWidget):
         """)
         # Buttons Container
         buttons_layout = QVBoxLayout()
-        self.register_button = QPushButton("Register New User")
+        self.register_button = QPushButton("Register Family")
         self.login_button = QPushButton("Login with Face ID")
         self.family_status_button = QPushButton("Family Reunification Status")
         self.family_status_button.setStyleSheet("""
@@ -118,44 +122,150 @@ class MainWindow(QWidget):
         """Show overall family reunification status"""
         status_dialog = QDialog(self)
         status_dialog.setWindowTitle("Family Reunification Status")
-        status_dialog.setFixedSize(600, 400)
-        layout = QVBoxLayout()
-        status_text = QTextEdit()
-        status_text.setReadOnly(True)
+        status_dialog.setFixedSize(800, 600)
         
-        # Get all safe members
+        # Add search functionality
+        search_container = QWidget()
+        search_layout = QHBoxLayout(search_container)
+        search_input = QLineEdit()
+        search_input.setPlaceholderText("Search by family name...")
+        search_input.setStyleSheet("""
+            QLineEdit {
+                padding: 8px;
+                border: 1px solid #ddd;
+                border-radius: 20px;
+                font-size: 14px;
+                min-width: 300px;
+            }
+        """)
+        search_layout.addWidget(search_input)
+        
+        # Create main container for family cards
+        status_container = QWidget()
+        status_layout = QVBoxLayout(status_container)
+        status_layout.setSpacing(15)
+        
+        # Create a dictionary to store all family cards
+        family_cards = {}
+        
+        def filter_families(text):
+            """Filter family cards based on search text"""
+            search_text = text.lower()
+            for family, card in family_cards.items():
+                if search_text in family.lower():
+                    card.show()
+                else:
+                    card.hide()
+        
+        search_input.textChanged.connect(filter_families)
+        
+        # Rest of the dialog setup
+        layout = QVBoxLayout()
+        layout.setSpacing(20)
+        layout.setContentsMargins(30, 30, 30, 30)
+        
+        # Add title and search bar
+        title = QLabel("Family Reunification Status")
+        title.setStyleSheet("""
+            QLabel {
+                font-size: 24px;
+                color: #2196F3;
+                padding-bottom: 10px;
+            }
+        """)
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        layout.addWidget(search_container)
+        
         safe_members = set()
         if os.path.exists(SAFE_LOG_FILE):
             with open(SAFE_LOG_FILE, 'r') as f:
                 safe_members = {line.strip().split(',')[0] for line in f}
         
-        # Check each family
-        status = []
         if os.path.exists(FAMILY_DIR):
+            total_members = 0
+            total_safe = 0
+            
             for family in os.listdir(FAMILY_DIR):
                 family_path = os.path.join(FAMILY_DIR, family)
                 if not os.path.isdir(family_path):
                     continue
-                    
-                # Get members from face files
+                
                 face_files = [f for f in os.listdir(family_path) if f.endswith('_face.jpg')]
                 if not face_files:
                     continue
-                    
-                members = {os.path.splitext(f)[0][:-5] for f in face_files}  # Remove _face.jpg
+                
+                members = {os.path.splitext(f)[0][:-5] for f in face_files}
                 safe = {m for m in members if m in safe_members}
                 missing = members - safe
                 
-                status.append(f"\nFamily: {family}")
-                status.append(f"Safe Members: {', '.join(safe) if safe else 'None'}")
-                status.append(f"Missing Members: {', '.join(missing) if missing else 'None'}")
+                # Create family card
+                family_card = QWidget()
+                family_card.setStyleSheet("""
+                    QWidget {
+                        background-color: white;
+                        border: 1px solid #ddd;
+                        border-radius: 10px;
+                        padding: 10px;
+                    }
+                """)
+                card_layout = QVBoxLayout(family_card)
+                
+                # Family name header
+                family_header = QLabel(f"Family: {family}")
+                family_header.setStyleSheet("font-size: 18px; color: #1976D2; padding: 5px;")
+                card_layout.addWidget(family_header)
+                
+                # Safe members with green indicators
+                if safe:
+                    safe_text = QLabel("✓ Safe Members: " + ", ".join(safe))
+                    safe_text.setStyleSheet("color: #4CAF50; padding: 5px;")
+                    safe_text.setWordWrap(True)
+                    card_layout.addWidget(safe_text)
+                
+                # Missing members with red indicators
+                if missing:
+                    missing_text = QLabel("⚠ Missing Members: " + ", ".join(missing))
+                    missing_text.setStyleSheet("color: #f44336; padding: 5px;")
+                    missing_text.setWordWrap(True)
+                    card_layout.addWidget(missing_text)
+                
+                status_layout.addWidget(family_card)
+                family_cards[family] = family_card
+                
+                total_members += len(members)
+                total_safe += len(safe)
+            
+            # Add summary at the top
+            if total_members > 0:
+                summary = QLabel(f"Total: {total_safe} of {total_members} members found safe ({(total_safe/total_members*100):.1f}%)")
+                summary.setStyleSheet("""
+                    QLabel {
+                        font-size: 16px;
+                        color: #333;
+                        padding: 10px;
+                        background-color: #e3f2fd;
+                        border-radius: 5px;
+                    }
+                """)
+                layout.addWidget(summary)
         
-        status_text.setText('\n'.join(status) if status else "No family records found.")
-        layout.addWidget(status_text)
+        # Add scrollable area for status
+        scroll = QScrollArea()
+        scroll.setWidget(status_container)
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+        """)
+        layout.addWidget(scroll)
         
+        # Close button
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(status_dialog.accept)
-        layout.addWidget(close_btn)
+        layout.addWidget(close_btn, alignment=Qt.AlignCenter)
         
         status_dialog.setLayout(layout)
         status_dialog.exec_()
@@ -237,6 +347,20 @@ class RegisterPage(QWidget):
         layout.addWidget(self.name_input)
         layout.addLayout(nav_layout)
         self.setLayout(layout)
+        self.face_app = FaceAnalysis(providers=['CPUExecutionProvider'])
+        self.face_app.prepare(ctx_id=0, det_size=(640, 480))
+
+    def reset(self):
+        """Reset registration form to initial state"""
+        self.family_name_input.clear()
+        self.photo_path.clear()
+        self.photo_display.clear()
+        self.name_input.clear()
+        self.name_input.setEnabled(False)
+        self.face_label.setText("Upload a family photo to start")
+        self.faces = []
+        self.current_face_index = 0
+        self.original_image = None
 
     def browse_photo(self):
         options = QFileDialog.Options()
@@ -248,7 +372,7 @@ class RegisterPage(QWidget):
 
     def detect_faces(self, image_path):
         try:
-            # Load image as BGR then convert to RGB for display
+            # Load image as BGR
             self.original_image = cv2.imread(image_path)
             if self.original_image is None:
                 raise Exception("Failed to load image")
@@ -256,17 +380,17 @@ class RegisterPage(QWidget):
             # Convert to RGB for display purposes
             self.display_image = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2RGB)
             
-            # Detect faces using RetinaFace
-            faces = RetinaFace.detect_faces(image_path)
+            # Detect faces using InsightFace
+            faces = self.face_app.get(self.original_image)
             self.faces = []
             
-            if isinstance(faces, dict):
-                for face_data in faces.values():
-                    facial_area = face_data["facial_area"]
-                    x1, y1, x2, y2 = map(int, facial_area)
+            if faces:
+                for face in faces:
+                    bbox = face.bbox.astype(int)
+                    x1, y1, x2, y2 = bbox
                     
-                    # Add padding
-                    pad = 20
+                    # Increase padding for larger face crops
+                    pad = 40  # Increased from 20 to 40
                     x1 = max(0, x1 - pad)
                     y1 = max(0, y1 - pad)
                     x2 = min(self.original_image.shape[1], x2 + pad)
@@ -373,6 +497,7 @@ class RegisterPage(QWidget):
             
             QMessageBox.information(self, "Success", 
                 f"Family {family_name} registered successfully with {len(self.faces)} members.")
+            self.reset()  # Reset the form after successful registration
             self.stacked_widget.setCurrentIndex(0)
             
         except Exception as e:
@@ -386,6 +511,11 @@ class RegisterPage(QWidget):
         if hasattr(self, 'camera') and self.camera is not None:
             self.camera.release()
             self.camera = None
+
+    def showEvent(self, event):
+        """Reset form when page is shown"""
+        self.reset()
+        super().showEvent(event)
 
 class LoginPage(QWidget):
     def __init__(self, stacked_widget):
@@ -436,8 +566,12 @@ class LoginPage(QWidget):
         self.camera = None
         self.last_detection_time = 0
         self.matched_user = None
-        self.face_embeddings_cache = {}  # Add cache for face embeddings
+        self.face_app = FaceAnalysis(providers=['CPUExecutionProvider'])
+        self.face_app.prepare(ctx_id=0, det_size=(640, 480))
+        self.face_embeddings_cache = {}
         self.face_detector = None
+        self.matched_users = set()  # Track multiple matches
+        self.matched_families = {}  # Track family for each match
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)  # Center all content vertically
         # Create a container widget for the camera feed
@@ -495,24 +629,18 @@ class LoginPage(QWidget):
         self.verification_thread = threading.Thread(target=self.verify_face, daemon=True)
         self.verification_thread.start()
 
-    def cosine_distance(self, emb1, emb2):
-        """Calculate cosine distance between two embeddings"""
-        a = np.array(emb1)
-        b = np.array(emb2)
-        return 1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    def cosine_similarity(self, emb1, emb2):
+        """Calculate cosine similarity between two embeddings"""
+        return np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
 
     def verify_face(self):
-        temp_frame_path = "temp_frame.jpg"
-        detector = RetinaFace
-
         while self.running:
             if self.camera is None:
                 time.sleep(0.1)
                 continue
 
-            # Reduce verification frequency
             current_time = time.time()
-            if current_time - self.last_detection_time < 0.5:  # Changed from 1.0 to 0.5
+            if current_time - self.last_detection_time < 0.5:
                 time.sleep(0.1)
                 continue
 
@@ -522,13 +650,6 @@ class LoginPage(QWidget):
                 continue
 
             try:
-                # First detect if there's a face in frame
-                faces = detector.detect_faces(frame)
-                if not faces:
-                    continue
-
-                cv2.imwrite(temp_frame_path, frame)
-
                 # Cache face embeddings if not already cached
                 if not self.face_embeddings_cache:
                     for family_folder in os.listdir(FAMILY_DIR):
@@ -542,65 +663,57 @@ class LoginPage(QWidget):
                         for face_file in face_files:
                             face_path = os.path.join(family_path, face_file)
                             try:
-                                embedding = DeepFace.represent(
-                                    img_path=face_path,
-                                    model_name='VGG-Face',
-                                    enforce_detection=False,
-                                    detector_backend='opencv'
-                                )
-                                name = os.path.splitext(face_file)[0][:-5]
-                                self.face_embeddings_cache[face_path] = {
-                                    'embedding': embedding[0]['embedding'],  # Get the actual embedding array
-                                    'name': name,
-                                    'family': family_folder
-                                }
+                                img = cv2.imread(face_path)
+                                faces = self.face_app.get(img)
+                                if faces:
+                                    embedding = faces[0].embedding
+                                    name = os.path.splitext(face_file)[0][:-5]
+                                    self.face_embeddings_cache[face_path] = {
+                                        'embedding': embedding,
+                                        'name': name,
+                                        'family': family_folder
+                                    }
                             except Exception as e:
                                 print(f"Error caching embedding for {face_path}: {str(e)}")
 
-                # Get embedding for current frame
-                frame_embedding = DeepFace.represent(
-                    img_path=temp_frame_path,
-                    model_name='VGG-Face',
-                    enforce_detection=False,
-                    detector_backend='opencv'
-                )[0]['embedding']
+                # Detect and get embeddings for current frame
+                faces = self.face_app.get(frame)
+                if not faces:
+                    continue
 
-                # Compare with cached embeddings
+                frame_embedding = faces[0].embedding
                 best_match = None
-                highest_confidence = 0
-                confidence_threshold = 0.6
+                highest_similarity = 0
+                similarity_threshold = 0.35  # Reduced from 0.5 to 0.35 for more lenient matching
                 matched_family = None
 
                 for face_path, cache_data in self.face_embeddings_cache.items():
                     try:
-                        distance = self.cosine_distance(
+                        similarity = self.cosine_similarity(
                             frame_embedding, 
                             cache_data['embedding']
                         )
-                        confidence = 1 - distance
 
-                        if confidence > confidence_threshold and confidence > highest_confidence:
-                            highest_confidence = confidence
+                        if similarity > similarity_threshold and similarity > highest_similarity:
+                            highest_similarity = similarity
                             best_match = cache_data['name']
                             matched_family = cache_data['family']
 
                     except Exception as e:
                         print(f"Error comparing with {face_path}: {str(e)}")
 
-                if os.path.exists(temp_frame_path):
-                    os.remove(temp_frame_path)
-
-                if best_match:
-                    self.matched_user = best_match
-                    self.matched_family = matched_family
-                    self.status_label.setText(f"Welcome, {self.matched_user}")
-                    self.check_family_status(self.matched_user, self.matched_family)
-                    return
+                if best_match and best_match not in self.matched_users:
+                    self.matched_users.add(best_match)
+                    self.matched_families[best_match] = matched_family
+                    # Update status with all matched users
+                    status_text = "Welcome!\nFound: " + ", ".join(self.matched_users)
+                    self.status_label.setText(status_text)
+                    # Show status for most recently matched user
+                    self.check_family_status(best_match, matched_family)
+                    # Don't return, keep looking for more faces
 
             except Exception as e:
                 print(f"Verification error: {str(e)}")
-                if os.path.exists(temp_frame_path):
-                    os.remove(temp_frame_path)
 
             time.sleep(0.1)
 
@@ -610,23 +723,35 @@ class LoginPage(QWidget):
         with open(SAFE_LOG_FILE, 'a+') as f:
             f.write(f"{member_name},{timestamp}\n")
 
-    def check_family_status(self, user_name, family_name):
+    def check_family_status(self, user_name, family_name=None):
         """Check and update family status display"""
         try:
-            family_path = os.path.join(FAMILY_DIR, family_name)
-            face_files = [f for f in os.listdir(family_path) if f.endswith('_face.jpg')]
-            family_members = [os.path.splitext(f)[0][:-5] for f in face_files]
-            safe_members = set()
-            if os.path.exists(SAFE_LOG_FILE):
-                with open(SAFE_LOG_FILE, 'r') as f:
-                    safe_members = {line.strip().split(',')[0] for line in f}
-            found_members = [m for m in family_members if m in safe_members]
-            missing_members = [m for m in family_members if m not in safe_members]
-            status_text = f"Family: {family_name}\n"
-            status_text += f"Found: {', '.join(found_members)}\n"
-            if missing_members:
-                status_text += f"Missing: {', '.join(missing_members)}"
-            self.family_status_label.setText(status_text)
+            if family_name is None:
+                # Try to find family by searching through directories
+                for folder in os.listdir(FAMILY_DIR):
+                    family_path = os.path.join(FAMILY_DIR, folder)
+                    if os.path.isdir(family_path):
+                        face_files = [f for f in os.listdir(family_path) if f.endswith('_face.jpg')]
+                        members = [os.path.splitext(f)[0][:-5] for f in face_files]
+                        if user_name in members:
+                            family_name = folder
+                            break
+
+            if family_name:
+                family_path = os.path.join(FAMILY_DIR, family_name)
+                face_files = [f for f in os.listdir(family_path) if f.endswith('_face.jpg')]
+                family_members = [os.path.splitext(f)[0][:-5] for f in face_files]
+                safe_members = set()
+                if os.path.exists(SAFE_LOG_FILE):
+                    with open(SAFE_LOG_FILE, 'r') as f:
+                        safe_members = {line.strip().split(',')[0] for line in f}
+                found_members = [m for m in family_members if m in safe_members]
+                missing_members = [m for m in family_members if m not in safe_members]
+                status_text = f"Family: {family_name}\n"
+                status_text += f"Found: {', '.join(found_members)}\n"
+                if missing_members:
+                    status_text += f"Missing: {', '.join(missing_members)}"
+                self.family_status_label.setText(status_text)
         except Exception as e:
             print(f"Error checking family status: {str(e)}")
 
@@ -643,6 +768,8 @@ class LoginPage(QWidget):
                 self.timer.start(30)
                 self.status_label.setText("Looking for face...")
                 self.matched_user = None
+                self.matched_users.clear()  # Clear previous matches
+                self.matched_families.clear()
                 self.running = True
                 if not self.verification_thread.is_alive():
                     self.verification_thread = threading.Thread(target=self.verify_face, daemon=True)
@@ -680,48 +807,19 @@ class LoginPage(QWidget):
 
     def on_continue(self):
         """Handle continue button click and update family status"""
-        if self.matched_user:
-            # Log the user as safe with timestamp
-            self.log_safe_member(self.matched_user)
+        if self.matched_users:
+            # Log all matched users as safe
+            for user in self.matched_users:
+                self.log_safe_member(user)
+                self.check_family_status(user, self.matched_families[user])
             
-            # Show reunification status
-            self.check_family_status(self.matched_user, self.matched_family)
-            
+            names = ", ".join(self.matched_users)
             QMessageBox.information(self, "Status Updated", 
-                f"{self.matched_user} has been marked as safe.")
+                f"The following members have been marked as safe:\n{names}")
             
             # Return to main window
             self.stop_camera()
             self.stacked_widget.setCurrentIndex(0)
-
-    def check_family_status(self, user_name):
-        """Check and return family status for the logged-in user"""
-        if not os.path.exists(FAMILY_DIR):
-            return None
-        try:
-            for family_folder in os.listdir(FAMILY_DIR):
-                family_path = os.path.join(FAMILY_DIR, family_folder)
-                info_file = os.path.join(family_path, "family_info.txt")
-                if os.path.exists(info_file):
-                    with open(info_file, 'r') as f:
-                        family_members = [line.strip() for line in f.readlines()]
-                    if user_name in family_members:
-                        safe_members = set()
-                        if os.path.exists(SAFE_LOG_FILE):
-                            with open(SAFE_LOG_FILE, 'r') as f:
-                                safe_members = {line.strip().split(',')[0] for line in f}
-                        found_members = [m for m in family_members if m in safe_members]
-                        missing_members = [m for m in family_members if m not in safe_members]
-                        status_text = f"Family: {family_folder}\n\n"
-                        status_text += f"Safe Members:\n{', '.join(found_members)}\n\n"
-                        if missing_members:
-                            status_text += f"Still Missing:\n{', '.join(missing_members)}"
-                        else:
-                            status_text += "All family members are safe!"
-                        return status_text
-        except Exception as e:
-            print(f"Error checking family status: {str(e)}")
-            return None
 
     def showEvent(self, event):
         """Start the camera when the page is shown."""
