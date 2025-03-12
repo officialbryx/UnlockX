@@ -11,6 +11,7 @@ import time
 import threading
 from datetime import datetime
 from retinaface import RetinaFace
+from face_recognition_util import FaceRecognizer
 
 FAMILY_DIR = "family_photos"
 SAFE_LOG_FILE = "safe_members.txt"
@@ -432,25 +433,41 @@ class LoginPage(QWidget):
             }
         """)
         self.stacked_widget = stacked_widget
-        self.face_match = False
         self.camera = None
         self.last_detection_time = 0
         self.matched_user = None
-        self.face_embeddings_cache = {}  # Add cache for face embeddings
+        self.matched_family = None
+        self.confidence_score = 0
+        self.face_embeddings_cache = {}  # Cache for face embeddings
+        self.detector_backend = 'retinaface'  # Specify better detector backend
         self.face_detector = None
+        self.current_frame = None
+        self.detection_active = False
+        self.detection_cooldown = 0.3  # Reduce cooldown for more frequent checks
+        self.face_recognizer = FaceRecognizer(FAMILY_DIR)
+        
+        # Set up UI components
         layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignCenter)  # Center all content vertically
-        # Create a container widget for the camera feed
+        layout.setAlignment(Qt.AlignCenter)
+        
+        # Camera container
         camera_container = QWidget()
         camera_layout = QVBoxLayout(camera_container)
         camera_layout.setAlignment(Qt.AlignCenter)
+        
         self.label = QLabel("Face Login")
         self.label.setAlignment(Qt.AlignCenter)
+        
         self.status_label = QLabel("Looking for face...")
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setObjectName("status_label")
+        
+        self.confidence_label = QLabel("")
+        self.confidence_label.setAlignment(Qt.AlignCenter)
+        self.confidence_label.setStyleSheet("color: #666666; font-size: 14px;")
+        
         self.image_label = QLabel()
-        self.image_label.setFixedSize(640, 480)  # Standard 4:3 aspect ratio
+        self.image_label.setFixedSize(640, 480)
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setStyleSheet("""
             QLabel {
@@ -459,25 +476,32 @@ class LoginPage(QWidget):
                 background-color: #ffffff;
             }
         """)
-        # Create button container for the bottom
+        
+        # Button container
         button_container = QHBoxLayout()
-        button_container.setAlignment(Qt.AlignCenter)  # Center the buttons
+        button_container.setAlignment(Qt.AlignCenter)
+        
         self.continue_button = QPushButton("Continue")
         self.continue_button.setObjectName("continue_button")
         self.continue_button.clicked.connect(self.on_continue)
+        self.continue_button.setEnabled(False)  # Disable until face is detected
+        
         self.back_button = QPushButton("Back")
         self.back_button.setObjectName("back_button")
         self.back_button.clicked.connect(self.go_back)
+        
         button_container.addWidget(self.continue_button)
         button_container.addWidget(self.back_button)
-        # Add widgets to the layout
+        
+        # Add widgets to layout
         layout.addWidget(self.label)
         layout.addWidget(self.status_label)
+        layout.addWidget(self.confidence_label)
         camera_layout.addWidget(self.image_label)
         layout.addWidget(camera_container)
         layout.addLayout(button_container)
-        self.setLayout(layout)
-        # Add family status label
+        
+        # Family status label
         self.family_status_label = QLabel("")
         self.family_status_label.setStyleSheet("""
             QLabel {
@@ -488,120 +512,61 @@ class LoginPage(QWidget):
         """)
         self.family_status_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.family_status_label)
+        
+        self.setLayout(layout)
+        
+        # Set up timer and thread for face detection
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
         self.lock = threading.Lock()
-        self.running = True
-        self.verification_thread = threading.Thread(target=self.verify_face, daemon=True)
-        self.verification_thread.start()
-
-    def cosine_distance(self, emb1, emb2):
-        """Calculate cosine distance between two embeddings"""
-        a = np.array(emb1)
-        b = np.array(emb2)
-        return 1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+        self.running = False
+        self.verification_thread = None
 
     def verify_face(self):
-        temp_frame_path = "temp_frame.jpg"
-        detector = RetinaFace
-
+        """Thread function to verify faces against the database"""
         while self.running:
-            if self.camera is None:
+            if self.camera is None or self.current_frame is None:
                 time.sleep(0.1)
                 continue
-
-            # Reduce verification frequency
+            
+            # Check cooldown
             current_time = time.time()
-            if current_time - self.last_detection_time < 0.5:  # Changed from 1.0 to 0.5
-                time.sleep(0.1)
+            if current_time - self.last_detection_time < self.detection_cooldown:
+                time.sleep(0.05)
                 continue
-
+            
             self.last_detection_time = current_time
-            ret, frame = self.camera.read()
-            if not ret:
-                continue
-
+            self.detection_active = True
+            
+            frame = self.current_frame.copy()
+            
             try:
-                # First detect if there's a face in frame
-                faces = detector.detect_faces(frame)
-                if not faces:
-                    continue
-
-                cv2.imwrite(temp_frame_path, frame)
-
-                # Cache face embeddings if not already cached
-                if not self.face_embeddings_cache:
-                    for family_folder in os.listdir(FAMILY_DIR):
-                        family_path = os.path.join(FAMILY_DIR, family_folder)
-                        if not os.path.isdir(family_path):
-                            continue
-
-                        face_files = [f for f in os.listdir(family_path) 
-                                    if f.endswith('_face.jpg')]
-                        
-                        for face_file in face_files:
-                            face_path = os.path.join(family_path, face_file)
-                            try:
-                                embedding = DeepFace.represent(
-                                    img_path=face_path,
-                                    model_name='VGG-Face',
-                                    enforce_detection=False,
-                                    detector_backend='opencv'
-                                )
-                                name = os.path.splitext(face_file)[0][:-5]
-                                self.face_embeddings_cache[face_path] = {
-                                    'embedding': embedding[0]['embedding'],  # Get the actual embedding array
-                                    'name': name,
-                                    'family': family_folder
-                                }
-                            except Exception as e:
-                                print(f"Error caching embedding for {face_path}: {str(e)}")
-
-                # Get embedding for current frame
-                frame_embedding = DeepFace.represent(
-                    img_path=temp_frame_path,
-                    model_name='VGG-Face',
-                    enforce_detection=False,
-                    detector_backend='opencv'
-                )[0]['embedding']
-
-                # Compare with cached embeddings
-                best_match = None
-                highest_confidence = 0
-                confidence_threshold = 0.6
-                matched_family = None
-
-                for face_path, cache_data in self.face_embeddings_cache.items():
-                    try:
-                        distance = self.cosine_distance(
-                            frame_embedding, 
-                            cache_data['embedding']
-                        )
-                        confidence = 1 - distance
-
-                        if confidence > confidence_threshold and confidence > highest_confidence:
-                            highest_confidence = confidence
-                            best_match = cache_data['name']
-                            matched_family = cache_data['family']
-
-                    except Exception as e:
-                        print(f"Error comparing with {face_path}: {str(e)}")
-
-                if os.path.exists(temp_frame_path):
-                    os.remove(temp_frame_path)
-
-                if best_match:
-                    self.matched_user = best_match
-                    self.matched_family = matched_family
+                # Use FaceRecognizer to identify face
+                name, family, confidence = self.face_recognizer.identify_face(frame)
+                
+                if name:
+                    self.matched_user = name
+                    self.matched_family = family
+                    self.confidence_score = confidence
+                    
                     self.status_label.setText(f"Welcome, {self.matched_user}")
+                    self.confidence_label.setText(f"Confidence: {self.confidence_score:.2%}")
+                    self.continue_button.setEnabled(True)
                     self.check_family_status(self.matched_user, self.matched_family)
-                    return
-
+                else:
+                    self.status_label.setText("Face detected, no match found")
+                    self.confidence_label.setText("Please try again or register")
+                    self.continue_button.setEnabled(False)
+                    
             except Exception as e:
                 print(f"Verification error: {str(e)}")
-                if os.path.exists(temp_frame_path):
-                    os.remove(temp_frame_path)
-
+                self.status_label.setText("Looking for face...")
+                self.confidence_label.setText("")
+                self.continue_button.setEnabled(False)
+            
+            finally:
+                self.detection_active = False
+            
             time.sleep(0.1)
 
     def log_safe_member(self, member_name):
@@ -616,62 +581,141 @@ class LoginPage(QWidget):
             family_path = os.path.join(FAMILY_DIR, family_name)
             face_files = [f for f in os.listdir(family_path) if f.endswith('_face.jpg')]
             family_members = [os.path.splitext(f)[0][:-5] for f in face_files]
+            
             safe_members = set()
             if os.path.exists(SAFE_LOG_FILE):
                 with open(SAFE_LOG_FILE, 'r') as f:
                     safe_members = {line.strip().split(',')[0] for line in f}
+            
             found_members = [m for m in family_members if m in safe_members]
             missing_members = [m for m in family_members if m not in safe_members]
+            
             status_text = f"Family: {family_name}\n"
             status_text += f"Found: {', '.join(found_members)}\n"
             if missing_members:
                 status_text += f"Missing: {', '.join(missing_members)}"
+            
             self.family_status_label.setText(status_text)
         except Exception as e:
             print(f"Error checking family status: {str(e)}")
 
+    def draw_face_box(self, frame):
+        """Draw a box around detected faces"""
+        if frame is None:
+            return frame
+        
+        try:
+            # Create a copy of the frame to avoid modifying the original
+            display_frame = frame.copy()
+            
+            # Use RetinaFace for face detection
+            # Save to temporary file for detection
+            temp_path = "temp_detection.jpg"
+            cv2.imwrite(temp_path, display_frame)
+            
+            # Detect faces
+            faces = RetinaFace.detect_faces(temp_path)
+            
+            # Remove temporary file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            
+            # Draw boxes around detected faces
+            if isinstance(faces, dict):
+                for face_key in faces:
+                    face = faces[face_key]
+                    # Get face coordinates
+                    x1, y1, x2, y2 = face['facial_area']
+                    
+                    # Draw rectangle (green for matched, blue for detected)
+                    color = (0, 255, 0) if self.matched_user else (255, 0, 0)
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+                    
+                    # Add confidence text if matched
+                    if self.matched_user:
+                        confidence_text = f"{self.confidence_score:.2%}"
+                        cv2.putText(display_frame, confidence_text, (x1, y1-10), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            
+            return display_frame
+        except Exception as e:
+            print(f"Error drawing face box: {str(e)}")
+            return frame
+
     def start_login_camera(self):
+        """Initialize and start the camera for login"""
         if self.camera is None:
             try:
                 self.camera = cv2.VideoCapture(0)
                 if not self.camera.isOpened():
                     QMessageBox.critical(self, "Camera Error",
-                                         "Could not access the camera. Please ensure camera permissions are granted in System Settings.")
+                                     "Could not access the camera. Please ensure camera permissions are granted.")
                     return
+                
+                # Set camera properties for better quality
                 self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                self.timer.start(30)
+                self.camera.set(cv2.CAP_PROP_AUTOFOCUS, 1)  # Enable autofocus if available
+                
+                # Start timer for frame updates
+                self.timer.start(30)  # Update every 30ms for smooth video
+                
+                # Reset UI state
                 self.status_label.setText("Looking for face...")
+                self.confidence_label.setText("")
                 self.matched_user = None
+                self.continue_button.setEnabled(False)
+                
+                # Start verification thread
                 self.running = True
-                if not self.verification_thread.is_alive():
+                if not self.verification_thread or not self.verification_thread.is_alive():
                     self.verification_thread = threading.Thread(target=self.verify_face, daemon=True)
                     self.verification_thread.start()
+                
+                # Pre-load face embeddings
+                if not self.face_embeddings_cache:
+                    threading.Thread(target=self.load_face_embeddings, daemon=True).start()
+                
             except Exception as e:
                 QMessageBox.critical(self, "Camera Error",
-                                     f"Failed to initialize camera: {str(e)}\nPlease check camera permissions in System Settings.")
+                                 f"Failed to initialize camera: {str(e)}\nPlease check camera permissions.")
                 return
 
     def stop_camera(self):
+        """Stop the camera and verification thread"""
         self.running = False
         if self.camera is not None:
             self.timer.stop()
             self.camera.release()
             self.camera = None
-        if self.verification_thread.is_alive():
+        
+        if self.verification_thread and self.verification_thread.is_alive():
             self.verification_thread.join(timeout=1.0)
+        
+        self.matched_user = None
+        self.confidence_score = 0
 
     def update_frame(self):
-        """Capture and update the webcam feed in QLabel."""
+        """Capture and update the webcam feed in QLabel with face detection"""
         if self.camera is not None:
             ret, frame = self.camera.read()
             if ret:
-                frame = cv2.resize(frame, (640, 480))
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                height, width, channel = frame.shape
-                bytes_per_line = 3 * width
-                q_img = QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
-                self.image_label.setPixmap(QPixmap.fromImage(q_img))
+                # Store current frame for verification thread
+                self.current_frame = frame.copy()
+                
+                # Only process frame for display if we're not currently in detection
+                if not self.detection_active:
+                    # Draw face detection box
+                    display_frame = self.draw_face_box(frame)
+                    
+                    # Convert to RGB for display
+                    display_frame = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+                    
+                    # Create QImage and display
+                    height, width, channel = display_frame.shape
+                    bytes_per_line = 3 * width
+                    q_img = QImage(display_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+                    self.image_label.setPixmap(QPixmap.fromImage(q_img))
 
     def go_back(self):
         """Handle back button click"""
@@ -688,88 +732,21 @@ class LoginPage(QWidget):
             self.check_family_status(self.matched_user, self.matched_family)
             
             QMessageBox.information(self, "Status Updated", 
-                f"{self.matched_user} has been marked as safe.")
+                                 f"{self.matched_user} has been marked as safe.")
             
             # Return to main window
             self.stop_camera()
             self.stacked_widget.setCurrentIndex(0)
-
-    def check_family_status(self, user_name):
-        """Check and return family status for the logged-in user"""
-        if not os.path.exists(FAMILY_DIR):
-            return None
-        try:
-            for family_folder in os.listdir(FAMILY_DIR):
-                family_path = os.path.join(FAMILY_DIR, family_folder)
-                info_file = os.path.join(family_path, "family_info.txt")
-                if os.path.exists(info_file):
-                    with open(info_file, 'r') as f:
-                        family_members = [line.strip() for line in f.readlines()]
-                    if user_name in family_members:
-                        safe_members = set()
-                        if os.path.exists(SAFE_LOG_FILE):
-                            with open(SAFE_LOG_FILE, 'r') as f:
-                                safe_members = {line.strip().split(',')[0] for line in f}
-                        found_members = [m for m in family_members if m in safe_members]
-                        missing_members = [m for m in family_members if m not in safe_members]
-                        status_text = f"Family: {family_folder}\n\n"
-                        status_text += f"Safe Members:\n{', '.join(found_members)}\n\n"
-                        if missing_members:
-                            status_text += f"Still Missing:\n{', '.join(missing_members)}"
-                        else:
-                            status_text += "All family members are safe!"
-                        return status_text
-        except Exception as e:
-            print(f"Error checking family status: {str(e)}")
-            return None
+        else:
+            QMessageBox.warning(self, "No Match", 
+                             "No face match detected. Please try again or register.")
 
     def showEvent(self, event):
-        """Start the camera when the page is shown."""
+        """Start the camera when the page is shown"""
         self.start_login_camera()
         super().showEvent(event)
 
     def hideEvent(self, event):
-        """Stop the camera when leaving the login page."""
+        """Stop the camera when leaving the login page"""
         self.stop_camera()
         super().hideEvent(event)
-
-def main():
-    app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon("logo/unlockx.png")) # Set application icon
-    stacked_widget = QStackedWidget()
-    stacked_widget.setFixedSize(1366, 768)  # Set the constant window size
-
-    main_window = MainWindow()
-    register_page = RegisterPage(stacked_widget)
-    login_page = LoginPage(stacked_widget)
-
-    stacked_widget.addWidget(main_window)
-    stacked_widget.addWidget(register_page)
-    stacked_widget.addWidget(login_page)
-
-    def update_title(widget):
-        if isinstance(widget, MainWindow):
-            stacked_widget.setWindowTitle("UnlockX")
-        elif isinstance(widget, RegisterPage):
-            stacked_widget.setWindowTitle("Register | UnlockX")
-        elif isinstance(widget, LoginPage):
-            stacked_widget.setWindowTitle("Login | UnlockX")
-
-    stacked_widget.currentChanged.connect(lambda: update_title(stacked_widget.currentWidget()))
-
-    main_window.register_button.clicked.connect(lambda: stacked_widget.setCurrentWidget(register_page))
-    main_window.login_button.clicked.connect(lambda: stacked_widget.setCurrentWidget(login_page))
-    main_window.login_button.clicked.connect(login_page.start_login_camera)
-
-    os.makedirs(FAMILY_DIR, exist_ok=True)
-    if not os.path.exists(SAFE_LOG_FILE):
-        open(SAFE_LOG_FILE, 'a').close()
-
-    stacked_widget.setCurrentWidget(main_window)
-    stacked_widget.show()
-
-    sys.exit(app.exec_())
-
-if __name__ == "__main__":
-    main()
-
