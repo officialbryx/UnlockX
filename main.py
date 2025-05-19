@@ -17,6 +17,7 @@ from insightface.utils import face_align
 warnings.filterwarnings('ignore', category=FutureWarning)
 
 FAMILY_DIR = "family_photos"
+UNKNOWN_DIR = "unknown_persons"
 SAFE_LOG_FILE = "safe_members.txt"
 
 class MainWindow(QWidget):
@@ -88,6 +89,7 @@ class MainWindow(QWidget):
         self.register_button = QPushButton("Register Family")
         self.login_button = QPushButton("Login with Face ID")
         self.family_status_button = QPushButton("Family Reunification Status")
+        self.unknown_faces_button = QPushButton("View Unknown Faces")
         self.family_status_button.setStyleSheet("""
             QPushButton {
                 background-color: #FF9800;
@@ -113,6 +115,7 @@ class MainWindow(QWidget):
         buttons_layout.addWidget(self.register_button, alignment=Qt.AlignCenter)
         buttons_layout.addWidget(self.login_button, alignment=Qt.AlignCenter)
         buttons_layout.addWidget(self.family_status_button, alignment=Qt.AlignCenter)
+        buttons_layout.addWidget(self.unknown_faces_button, alignment=Qt.AlignCenter)
         layout.addLayout(logo_container)
         layout.addLayout(buttons_layout)
         layout.setContentsMargins(50, 50, 50, 50)
@@ -572,6 +575,9 @@ class LoginPage(QWidget):
         self.face_detector = None
         self.matched_users = set()  # Track multiple matches
         self.matched_families = {}  # Track family for each match
+        self.last_unknown_save = 0  # Add cooldown for unknown face saves
+        self.unknown_save_cooldown = 3  # Seconds between unknown face saves
+        self.similarity_threshold = 0.25  # Lower threshold to be more lenient with partial faces
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)  # Center all content vertically
         # Create a container widget for the camera feed
@@ -664,6 +670,9 @@ class LoginPage(QWidget):
                             face_path = os.path.join(family_path, face_file)
                             try:
                                 img = cv2.imread(face_path)
+                                if img is None:
+                                    print(f"Failed to load image: {face_path}")
+                                    continue
                                 faces = self.face_app.get(img)
                                 if faces:
                                     embedding = faces[0].embedding
@@ -673,6 +682,7 @@ class LoginPage(QWidget):
                                         'name': name,
                                         'family': family_folder
                                     }
+                                    print(f"Successfully cached face: {name} from family: {family_folder}")
                             except Exception as e:
                                 print(f"Error caching embedding for {face_path}: {str(e)}")
 
@@ -684,7 +694,6 @@ class LoginPage(QWidget):
                 frame_embedding = faces[0].embedding
                 best_match = None
                 highest_similarity = 0
-                similarity_threshold = 0.35  # Reduced from 0.5 to 0.35 for more lenient matching
                 matched_family = None
 
                 for face_path, cache_data in self.face_embeddings_cache.items():
@@ -694,7 +703,7 @@ class LoginPage(QWidget):
                             cache_data['embedding']
                         )
 
-                        if similarity > similarity_threshold and similarity > highest_similarity:
+                        if similarity > self.similarity_threshold and similarity > highest_similarity:
                             highest_similarity = similarity
                             best_match = cache_data['name']
                             matched_family = cache_data['family']
@@ -710,7 +719,40 @@ class LoginPage(QWidget):
                     self.status_label.setText(status_text)
                     # Show status for most recently matched user
                     self.check_family_status(best_match, matched_family)
-                    # Don't return, keep looking for more faces
+                elif not best_match and current_time - self.last_unknown_save >= self.unknown_save_cooldown:
+                    # Print debug info about similarity scores
+                    print("\nSimilarity scores for detected face:")
+                    for face_path, cache_data in self.face_embeddings_cache.items():
+                        try:
+                            similarity = self.cosine_similarity(frame_embedding, cache_data['embedding'])
+                            print(f"{cache_data['name']} (Family: {cache_data['family']}): {similarity:.3f}")
+                        except Exception as e:
+                            continue
+
+                    # Save unknown face
+                    if not os.path.exists(UNKNOWN_DIR):
+                        os.makedirs(UNKNOWN_DIR)
+
+                    # Get face from frame
+                    bbox = faces[0].bbox.astype(int)
+                    x1, y1, x2, y2 = bbox
+                    
+                    # Add padding
+                    pad = 40
+                    x1 = max(0, x1 - pad)
+                    y1 = max(0, y1 - pad)
+                    x2 = min(frame.shape[1], x2 + pad)
+                    y2 = min(frame.shape[0], y2 + pad)
+                    
+                    face_img = frame[y1:y2, x1:x2].copy()
+                    
+                    # Generate filename with timestamp
+                    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                    face_path = os.path.join(UNKNOWN_DIR, f"unknown_{timestamp}.jpg")
+                    cv2.imwrite(face_path, face_img)
+                    
+                    self.last_unknown_save = current_time  # Update last save timestamp
+                    self.status_label.setText("Face not recognized. Saved for later identification.")
 
             except Exception as e:
                 print(f"Verification error: {str(e)}")
@@ -831,6 +873,370 @@ class LoginPage(QWidget):
         self.stop_camera()
         super().hideEvent(event)
 
+class UnknownFacesPage(QWidget):
+    def __init__(self, stacked_widget):
+        super().__init__()
+        self.setWindowTitle("Unknown Faces | UnlockX")
+        self.stacked_widget = stacked_widget
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #f0f0f0;
+            }
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border: none;
+                border-radius: 20px;
+                padding: 10px 20px;
+                font-size: 14px;
+                min-width: 100px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton#delete_button {
+                background-color: #fde7e7;
+                color: #c62828;
+                min-width: 120px;
+                border: 1px solid #ef9a9a;
+                font-weight: 500;
+                padding: 12px 24px;
+            }
+            QPushButton#delete_button:hover {
+                background-color: #ffcdd2;
+                border-color: #ef5350;
+            }
+            QPushButton#submit_button {
+                background-color: #e8f5e9;
+                color: #2e7d32;
+                min-width: 120px;
+                border: 1px solid #a5d6a7;
+                font-weight: 500;
+                padding: 12px 24px;
+            }
+            QPushButton#submit_button:hover {
+                background-color: #c8e6c9;
+                border-color: #66bb6a;
+            }
+            QLabel {
+                color: #333333;
+                font-size: 16px;
+            }
+            QComboBox, QLineEdit {
+                padding: 8px;
+                border: 1px solid #ddd;
+                border-radius: 10px;
+                font-size: 14px;
+                min-width: 200px;
+            }
+            QComboBox:focus, QLineEdit:focus {
+                border-color: #2196F3;
+            }
+        """)
+        
+        layout = QVBoxLayout()
+        
+        # Header
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        
+        # Title
+        title = QLabel("Unknown Faces")
+        title.setStyleSheet("font-size: 28px; color: #2196F3; font-weight: bold; margin-bottom: 20px;")
+        title.setAlignment(Qt.AlignCenter)
+        
+        # Refresh button
+        refresh_button = QPushButton("🔄 Refresh")
+        refresh_button.clicked.connect(self.load_unknown_faces)
+        refresh_button.setFixedWidth(120)
+        
+        header_layout.addWidget(title, alignment=Qt.AlignCenter)
+        header_layout.addWidget(refresh_button, alignment=Qt.AlignRight)
+        layout.addWidget(header)
+        
+        # Scrollable area for face cards
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #f0f0f0;
+                width: 10px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #bbbbbb;
+                border-radius: 5px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #999999;
+            }
+        """)
+        
+        faces_container = QWidget()
+        self.faces_layout = QVBoxLayout(faces_container)
+        self.faces_layout.setSpacing(20)
+        
+        scroll.setWidget(faces_container)
+        layout.addWidget(scroll)
+        
+        # Back button
+        back_button = QPushButton("← Back to Main")
+        back_button.clicked.connect(self.go_back)
+        layout.addWidget(back_button, alignment=Qt.AlignCenter)
+        
+        self.setLayout(layout)
+        self.load_unknown_faces()
+        
+    def load_unknown_faces(self):
+        """Load and display unknown faces from the unknown_persons directory"""
+        # Clear existing face cards
+        for i in reversed(range(self.faces_layout.count())):
+            widget = self.faces_layout.itemAt(i).widget()
+            if widget:
+                widget.deleteLater()
+            
+        if not os.path.exists(UNKNOWN_DIR):
+            os.makedirs(UNKNOWN_DIR)
+            
+        face_files = [f for f in os.listdir(UNKNOWN_DIR) if f.startswith('unknown_') and f.endswith('.jpg')]
+        
+        if not face_files:
+            no_faces_label = QLabel("No unknown faces found")
+            no_faces_label.setStyleSheet("color: #666; font-size: 18px; padding: 20px;")
+            no_faces_label.setAlignment(Qt.AlignCenter)
+            self.faces_layout.addWidget(no_faces_label)
+            return
+            
+        # Sort files by timestamp (newest first)
+        face_files.sort(reverse=True)
+        
+        for face_file in face_files:
+            face_path = os.path.join(UNKNOWN_DIR, face_file)
+            timestamp = face_file[8:-4]  # Remove 'unknown_' prefix and '.jpg' suffix
+            formatted_timestamp = datetime.strptime(timestamp, '%Y%m%d%H%M%S').strftime('%Y-%m-%d %H:%M:%S')
+            self.create_face_card(face_path, formatted_timestamp)
+                
+    def create_face_card(self, face_path, timestamp):
+        """Create a card widget for an unknown face"""
+        card = QWidget()
+        card.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border: 1px solid #ddd;
+                border-radius: 15px;
+                padding: 15px;
+            }
+            QWidget:hover {
+                border-color: #2196F3;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+        """)
+        card_layout = QHBoxLayout()
+        
+        # Left side - Face image and timestamp
+        left_container = QWidget()
+        left_layout = QVBoxLayout(left_container)
+        
+        # Face image
+        face_label = QLabel()
+        face_pixmap = QPixmap(face_path)
+        if not face_pixmap.isNull():
+            scaled_pixmap = face_pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            face_label.setPixmap(scaled_pixmap)
+            face_label.setFixedSize(150, 150)
+        
+        # Timestamp
+        time_label = QLabel(f"📅 Detected: {timestamp}")
+        time_label.setStyleSheet("color: #666; font-size: 12px;")
+        
+        left_layout.addWidget(face_label, alignment=Qt.AlignCenter)
+        left_layout.addWidget(time_label, alignment=Qt.AlignCenter)
+        
+        # Right side - Controls
+        right_container = QWidget()
+        right_layout = QVBoxLayout(right_container)
+        
+        # Add to family controls
+        family_container = QWidget()
+        family_layout = QGridLayout(family_container)
+        
+        family_label = QLabel("Select Family:")
+        family_combo = QComboBox()
+        family_combo.addItem("Select Family")
+        family_combo.addItems([d for d in os.listdir(FAMILY_DIR) if os.path.isdir(os.path.join(FAMILY_DIR, d))])
+        
+        name_label = QLabel("Enter Name:")
+        name_input = QLineEdit()
+        name_input.setPlaceholderText("Person's name")
+        
+        submit_button = QPushButton("Submit")
+        submit_button.setObjectName("submit_button")
+        submit_button.clicked.connect(lambda: self.confirm_add_to_family(face_path, family_combo, name_input))
+        
+        # Add new family option
+        new_family_label = QLabel("Or Create New Family:")
+        new_family_input = QLineEdit()
+        new_family_input.setPlaceholderText("New family name")
+        
+        create_button = QPushButton("Create New Family")
+        create_button.setObjectName("submit_button")
+        create_button.clicked.connect(lambda: self.confirm_create_new_family(face_path, new_family_input, name_input))
+        
+        # Delete button
+        delete_button = QPushButton("Delete Face")
+        delete_button.setObjectName("delete_button")
+        delete_button.clicked.connect(lambda: self.delete_unknown_face(face_path))
+        
+        # Add widgets to grid layout
+        family_layout.addWidget(family_label, 0, 0)
+        family_layout.addWidget(family_combo, 0, 1)
+        family_layout.addWidget(name_label, 1, 0)
+        family_layout.addWidget(name_input, 1, 1)
+        family_layout.addWidget(submit_button, 1, 2)
+        family_layout.addWidget(new_family_label, 2, 0)
+        family_layout.addWidget(new_family_input, 2, 1)
+        family_layout.addWidget(create_button, 2, 2)
+        family_layout.addWidget(delete_button, 3, 0)
+        
+        right_layout.addWidget(family_container)
+        
+        # Add containers to card
+        card_layout.addWidget(left_container)
+        card_layout.addWidget(right_container)
+        
+        card.setLayout(card_layout)
+        self.faces_layout.addWidget(card)
+        
+    def delete_unknown_face(self, face_path):
+        """Delete an unknown face"""
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deletion",
+            "Are you sure you want to delete this unknown face?\nThis action cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                os.remove(face_path)
+                QMessageBox.information(self, "Success", "Face deleted successfully")
+                self.load_unknown_faces()  # Refresh the list
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete face: {str(e)}")
+
+    def add_to_family(self, face_path, family_name, person_name):
+        """Add unknown face to an existing family"""
+        if not family_name or family_name == "Select Family" or not person_name.strip():
+            QMessageBox.warning(self, "Input Error", "Please select a family and enter a name.")
+            return
+            
+        try:
+            # Create new face file in family directory
+            family_dir = os.path.join(FAMILY_DIR, family_name)
+            new_face_path = os.path.join(family_dir, f"{person_name}_face.jpg")
+            
+            # Copy face image
+            shutil.copy2(face_path, new_face_path)
+            
+            # Remove from unknown faces
+            os.remove(face_path)
+            
+            QMessageBox.information(self, "Success", 
+                f"Added {person_name} to family {family_name}")
+            
+            # Reload the page
+            self.load_unknown_faces()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to add to family: {str(e)}")
+            
+    def create_new_family(self, face_path, family_name, person_name):
+        """Create a new family with the unknown face"""
+        if not family_name.strip() or not person_name.strip():
+            QMessageBox.warning(self, "Input Error", "Please enter both family name and person name.")
+            return
+            
+        try:
+            # Create new family directory
+            family_dir = os.path.join(FAMILY_DIR, family_name)
+            os.makedirs(family_dir, exist_ok=True)
+            
+            # Copy face to new family directory
+            new_face_path = os.path.join(family_dir, f"{person_name}_face.jpg")
+            shutil.copy2(face_path, new_face_path)
+            
+            # Remove from unknown faces
+            os.remove(face_path)
+            
+            QMessageBox.information(self, "Success", 
+                f"Created new family {family_name} with member {person_name}")
+            
+            # Reload the page
+            self.load_unknown_faces()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to create family: {str(e)}")
+            
+    def confirm_add_to_family(self, face_path, family_combo, name_input):
+        """Show confirmation dialog before adding to family"""
+        family_name = family_combo.currentText()
+        person_name = name_input.text().strip()
+        
+        if not family_name or family_name == "Select Family" or not person_name:
+            QMessageBox.warning(self, "Input Error", "Please select a family and enter a name.")
+            return
+            
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Addition",
+            f"Are you sure you want to add this person as '{person_name}' to family '{family_name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if confirm == QMessageBox.Yes:
+            self.add_to_family(face_path, family_name, person_name)
+            
+    def confirm_create_new_family(self, face_path, family_input, name_input):
+        """Show confirmation dialog before creating new family"""
+        family_name = family_input.text().strip()
+        person_name = name_input.text().strip()
+        
+        if not family_name or not person_name:
+            QMessageBox.warning(self, "Input Error", "Please enter both family name and person name.")
+            return
+            
+        # Check if family already exists
+        if os.path.exists(os.path.join(FAMILY_DIR, family_name)):
+            QMessageBox.warning(self, "Input Error", f"Family '{family_name}' already exists. Please choose a different name.")
+            return
+            
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Creation",
+            f"Are you sure you want to create a new family '{family_name}' with first member '{person_name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if confirm == QMessageBox.Yes:
+            self.create_new_family(face_path, family_name, person_name)
+            
+    def go_back(self):
+        """Return to main window"""
+        self.stacked_widget.setCurrentIndex(0)
+
+    def cosine_similarity(self, emb1, emb2):
+        """Calculate cosine similarity between two embeddings"""
+        return np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
+
 def main():
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon("logo/unlockx.png")) # Set application icon
@@ -840,10 +1246,12 @@ def main():
     main_window = MainWindow()
     register_page = RegisterPage(stacked_widget)
     login_page = LoginPage(stacked_widget)
+    unknown_faces_page = UnknownFacesPage(stacked_widget)
 
     stacked_widget.addWidget(main_window)
     stacked_widget.addWidget(register_page)
     stacked_widget.addWidget(login_page)
+    stacked_widget.addWidget(unknown_faces_page)
 
     def update_title(widget):
         if isinstance(widget, MainWindow):
@@ -852,12 +1260,15 @@ def main():
             stacked_widget.setWindowTitle("Register | UnlockX")
         elif isinstance(widget, LoginPage):
             stacked_widget.setWindowTitle("Login | UnlockX")
+        elif isinstance(widget, UnknownFacesPage):
+            stacked_widget.setWindowTitle("Unknown Faces | UnlockX")
 
     stacked_widget.currentChanged.connect(lambda: update_title(stacked_widget.currentWidget()))
 
     main_window.register_button.clicked.connect(lambda: stacked_widget.setCurrentWidget(register_page))
     main_window.login_button.clicked.connect(lambda: stacked_widget.setCurrentWidget(login_page))
     main_window.login_button.clicked.connect(login_page.start_login_camera)
+    main_window.unknown_faces_button.clicked.connect(lambda: stacked_widget.setCurrentWidget(unknown_faces_page))
 
     os.makedirs(FAMILY_DIR, exist_ok=True)
     if not os.path.exists(SAFE_LOG_FILE):
@@ -870,4 +1281,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
